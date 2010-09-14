@@ -1,0 +1,341 @@
+#!/usr/bin/env python
+
+import io
+import os
+import pytz
+import time 
+import logging
+import datetime
+import threading
+import ConfigParser
+
+logging.basicConfig(level=logging.INFO)
+GMT = pytz.timezone('GMT')
+
+from pyjabberbot import PersistentBot, botcmd
+
+DATA_PREFIX = '| '
+
+
+def get_midnight():
+    today = datetime.datetime.now(GMT)
+    tomorrow = today + datetime.timedelta(days=1)
+    return tomorrow.replace(hour=0, minute=0, second=0,
+        microsecond=0)
+
+class Replica(PersistentBot):
+    """ Replicator """
+
+    def __init__(self, jid, password, whitelist, res = None):
+        super(Replica, self).__init__(jid, password, res)
+
+        self.sources = {}
+        self.new_sources = []
+        self.users = []
+        self.ignore_offline = True
+        self.whitelist = whitelist
+        self.message_queue = []
+        self.thread_killed = False
+        self.sidc = False
+        self.cfg = None
+        self.status_reload = False
+        self.update_status = ''
+        self.frames = 0
+        self.room = ''
+        #self.xmpp_debug = ['always', 'nodebuilder']
+
+    def whitelisted(self, msg):
+        """ Check whitelist """
+        return msg.getFrom().getStripped() in self.whitelist
+
+    @botcmd
+    def subscribe(self, msg, args):
+        """ Subscribe to the broadcast list """
+        user = msg.getFrom()
+        if not self.whitelisted(msg):
+            return 'You are not allowed to subscribe'
+        if user in self.users:
+            return 'You are already subscribed.'
+        else:
+            self.users.append(user)
+            self.status_reload = True
+            return 'You are now subscribed.'
+
+    @botcmd
+    def unsubscribe(self, msg, args):
+        """ Unsubscribe from the broadcast list """
+        user = msg.getFrom()
+        if not user in self.users:
+            return 'You are not subscribed!'
+        else:
+            self.users.remove(user)
+            self.status_reload = True
+            return 'You are now unsubscribed.'
+
+    @botcmd(name='status')
+    def current_status(self, msg, args):
+        """ Get current status """
+        self.status_reload = True
+        time.sleep(1)
+        return '%s' % self.status[1]
+
+    @botcmd
+    def frames(self, msg, args):
+        """ Number of frames received """
+        ret = '\n'
+        for source, frames in self.sources.iteritems():
+            ret += '%s: %s\n' % (source, frames)
+        return '%s' % ret[:-1]
+
+    @botcmd
+    def reset_frames(self, msg, args):
+        if not self.whitelisted(msg):
+            return 'You are not allowed to do this'
+        for source in self.sources.keys():
+            self.sources[source] = 0
+        return 'Done'
+
+    @botcmd
+    def report(self, msg, args):
+        """ Identify this instance """
+        return '(r) %s' % self.jid
+
+    @botcmd
+    def time(self, msg, args):
+        """ Displays current server time """
+        return str(datetime.datetime.now())
+
+    @botcmd
+    def gmtime(self, msg, args):
+        """ Displays current server time (GMT) """
+        return str(datetime.datetime.now(GMT))
+
+    @botcmd
+    def midnight(self, msg, args):
+        """ Return time to midnight """
+        return str(get_midnight() - datetime.datetime.now(GMT))
+
+    @botcmd
+    def die(self, msg, args):
+        """ Quit """
+        if not self.whitelisted(msg):
+            return 'You are not allowed to do this'
+        self.quit()
+
+    @botcmd
+    def sources(self, msg, args):
+        """ List all sources """
+        ret = '\n'
+        for source in self.sources.keys():
+            ret += '%s\n' % source
+        return ret[:-1]
+
+    @botcmd
+    def sources_unsubscribe(self, msg, args):
+        """ Unsubscribe from all sources """
+        if not self.whitelisted(msg):
+            return 'You are not allowed to do this'
+        for jid in self.sources.keys():
+            self.send(jid, 'unsubscribe')
+        return 'Unsubscribed from all sources'
+
+    @botcmd
+    def sources_restart(self, msg, args):
+        """ Restart all sources via 'die' command """
+        if not self.whitelisted(msg):
+            return 'You are not allowed to do this'
+        for jid in self.sources.keys():
+            self.send(jid, 'die')
+
+        self.sources = {}
+        self.update_status = True
+        return 'Done'
+
+    def callback_message(self, conn, msg):
+        txt = msg.getBody()
+        done = False
+
+        if txt is not None:
+            logging.debug(txt)
+            if '(s)' in txt:
+                jid = txt.split()[1]
+                if not jid in (self.sources.keys() + self.new_sources):
+                    logging.info('New source discovered: %s' % jid)
+                    self.new_sources.append(jid)
+                done = True
+
+            if ' subscribed' in txt:
+                jid = msg.getFrom().getStripped()
+                try:
+                    idx = self.new_sources.index(jid)
+                    del self.new_sources[idx] 
+                    self.sources[jid] = 0
+                    logging.info('Subscribed to %s' % jid)
+                    self.status_reload = True
+                except ValueError:
+                    logging.warning('Received subscription from unknown'
+                        ' source, ignoring')
+                done = True
+
+            if ' unsubscribed' in txt:
+                jid = msg.getFrom().getStripped()
+                del self.sources[jid]
+                logging.info('Unsubscribed from %s' % jid)
+                self.status_reload = True
+                done = True
+
+            if 'Unknown command' in txt:
+                done = True
+
+            if DATA_PREFIX == txt[0:len(DATA_PREFIX)]:
+                sjid = msg.getFrom().getStripped()
+                if '#' == txt[len(DATA_PREFIX)]:
+                    logging.info('Header from %s' % sjid)
+                else:
+                    logging.info('Data: %s' % sjid)
+
+                if sjid in self.sources:
+                    self.sources[sjid] += 1
+                self.message_queue.append('|%s%s' % (sjid, txt))
+                done = True
+
+        if not done:
+            return super(Replica, self).callback_message(conn, msg)
+
+    def obsolete(self, jid, new_status):
+        if new_status == self.OFFLINE:
+            sjid = jid.getStripped()
+            if sjid in self.sources:
+                logging.info('Source %s gone offline'
+                    ', deleting' % jid)
+                del self.sources[sjid]
+                self.status_reload = True
+            try:
+                idx = self.users.index(jid)
+                logging.info('Subscriber %s gone offline'
+                    ', unsubscribing' % jid)
+                del self.users[idx]
+                self.status_reload = True
+            except ValueError:
+                pass
+
+    def callback_presence(self, conn, pre):
+        super(Replica, self).callback_presence(conn, pre,
+            status_type_changed = self.obsolete)
+
+
+    def idle_proc(self):
+        super(Replica, self).idle_proc()
+
+        if not len(self.message_queue):
+            return
+
+        messages = self.message_queue
+        self.message_queue = []
+
+        for message in messages:
+            for user in self.users:
+                self.send(user, message)
+
+    def thread_status(self):
+        time.sleep(2)
+        self.send(self.room, 'report', typ = 'groupchat')
+        while not self.thread_killed:
+            if self.sources != []:
+                self.status = (self.DND, '%s sources, %s sinks' %
+                    (len(self.sources), len(self.users)))
+            else:
+                self.status = (self.AWAY, 'No sources')
+            self.join_room(self.room)
+
+            for i in range(300):
+                time.sleep(1)
+                if self.thread_killed:
+                    return
+                if self.status_reload:
+                    self.status_reload = False
+                    break
+
+    def thread_peers(self):
+        while not self.thread_killed:
+            for jid in self.new_sources:
+                logging.info('Trying to subscribe to %s' % jid)
+                try:
+                    subs = self.roster.getSubscription(jid)
+                    logging.info('On roster %s, with %s' % (jid, subs))
+                    if subs == 'none':
+                        self.roster.Authorize(jid)
+                    self.send(jid, 'subscribe')
+                except KeyError:
+                    logging.info('Not on roster %s' % jid)
+                    # not on our roster
+                    self.roster.Subscribe(jid)
+
+            for i in range(10):
+                time.sleep(1)
+                if self.thread_killed:
+                    return
+
+
+    def thread_stream(self):
+        return
+        file = None
+        rewind = True
+        midnight = get_midnight()
+        pointer = 0
+
+        while not self.thread_killed:
+            if midnight < datetime.datetime.now(GMT):
+                logging.info('Day changed, changing file')
+                if file is not None:
+                    file.close()
+                    file = None
+                rewind = False
+                self.status_reload = True
+                midnight = get_midnight()
+
+            for i in range(2):
+                time.sleep(1)
+                if self.thread_killed:
+                    return
+
+
+defaults = '''
+[config]
+jid = myjid@example.org
+pass = nopassword
+whitelist = nouser@example.org, nouser@example.org
+room = noroom@conf.example.org
+'''
+ 
+if __name__ == '__main__':
+    config = ConfigParser.RawConfigParser()
+    config.readfp(io.BytesIO(defaults))
+    config.read('/etc/sidc_replica.conf')
+
+    whitelist = config.get('config', 'whitelist').split(',')
+    whitelist = map(lambda x: x.strip(), whitelist)
+    get = lambda x: config.get('config', x).strip()
+
+    room = get('room')
+
+    logging.info('Whitelist %s' % whitelist)
+    logging.info('Room %s' % room)
+
+    bot = Replica(get('jid'), get('pass'), whitelist, '\\')
+
+    thread_status = threading.Thread(target = bot.thread_status)
+    thread_stream = threading.Thread(target = bot.thread_stream)
+    thread_peers  = threading.Thread(target = bot.thread_peers)
+
+    def start_threads():
+        thread_status.start()
+        thread_stream.start()
+        thread_peers.start()
+
+    bot.join_room(room)
+    bot.room = room
+    time.sleep(1)
+    bot.status = (bot.AVAILABLE, 'Startup')
+    bot.serve_forever(connect_callback = start_threads)
+    bot.thread_killed = True
