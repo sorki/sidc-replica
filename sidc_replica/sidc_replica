@@ -211,6 +211,11 @@ class Replica(PersistentBot):
                 self.message_queue.append('|%s%s' % (sjid, txt))
                 done = True
 
+            if msg.getType() == 'groupchat':
+                if (self.jid.getNode()+':') in txt:
+                    nbody = txt[len(self.jid.getNode())+1:].strip()
+                    msg.setBody(nbody)
+
         if not done:
             return super(Replica, self).callback_message(conn, msg)
 
