@@ -31,6 +31,7 @@ class Replica(PersistentBot):
 
         self.sources = {}
         self.new_sources = []
+        self.old_sources = {}
         self.users = []
         self.ignore_offline = True
         self.whitelist = whitelist
@@ -131,6 +132,14 @@ class Replica(PersistentBot):
         return ret[:-1]
 
     @botcmd
+    def sources_old(self, msg, args):
+        """ List old sources """
+        ret = '\n'
+        for source in self.old_sources.keys():
+            ret += '%s\n' % source
+        return ret[:-1]
+
+    @botcmd
     def sources_unsubscribe(self, msg, args):
         """ Unsubscribe from all sources """
         if not self.whitelisted(msg):
@@ -148,6 +157,7 @@ class Replica(PersistentBot):
             self.send(jid, 'die')
 
         self.sources = {}
+        self.old_sources = {}
         self.update_status = True
         return 'Done'
 
@@ -191,11 +201,13 @@ class Replica(PersistentBot):
                 sjid = msg.getFrom().getStripped()
                 if '#' == txt[len(DATA_PREFIX)]:
                     logging.info('Header from %s' % sjid)
-                else:
-                    logging.info('Data: %s' % sjid)
 
                 if sjid in self.sources:
                     self.sources[sjid] += 1
+                elif sjid in self.old_sources:
+                    logging.info('Old source reappeared %s' % sjid)
+                    self.sources[sjid] = self.old_sources[sjid] + 1
+                    self.status_reload = True
                 self.message_queue.append('|%s%s' % (sjid, txt))
                 done = True
 
@@ -207,7 +219,8 @@ class Replica(PersistentBot):
             sjid = jid.getStripped()
             if sjid in self.sources:
                 logging.info('Source %s gone offline'
-                    ', deleting' % jid)
+                    ', moving to old' % jid)
+                self.old_sources[sjid] = self.sources[sjid]
                 del self.sources[sjid]
                 self.status_reload = True
             try:
