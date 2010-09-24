@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import io
-import os
 import pytz
 import time 
 import logging
@@ -37,8 +36,6 @@ class Replica(PersistentBot):
         self.whitelist = whitelist
         self.message_queue = []
         self.thread_killed = False
-        self.sidc = False
-        self.cfg = None
         self.status_reload = False
         self.update_status = ''
         self.frames = 0
@@ -53,8 +50,6 @@ class Replica(PersistentBot):
     def subscribe(self, msg, args):
         """ Subscribe to the broadcast list """
         user = msg.getFrom()
-        if not self.whitelisted(msg):
-            return 'You are not allowed to subscribe'
         if user in self.users:
             return 'You are already subscribed.'
         else:
