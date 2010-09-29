@@ -203,7 +203,7 @@ class Replica(PersistentBot):
                     logging.info('Old source reappeared %s' % sjid)
                     self.sources[sjid] = self.old_sources[sjid] + 1
                     self.status_reload = True
-                self.message_queue.append('|%s%s' % (sjid, txt))
+                self.message_queue.append('%s%s%s' % (DATA_PREFIX, sjid, txt))
                 done = True
 
             if msg.getType() == 'groupchat':
