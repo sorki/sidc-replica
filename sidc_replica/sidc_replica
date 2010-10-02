@@ -342,13 +342,13 @@ if __name__ == '__main__':
     thread_peers  = threading.Thread(target = bot.thread_peers)
 
     def start_threads():
+        bot.join_room(room)
+        bot.room = room
+        bot.status = (bot.AVAILABLE, 'Startup')
         thread_status.start()
         thread_stream.start()
         thread_peers.start()
 
-    bot.join_room(room)
-    bot.room = room
-    time.sleep(1)
-    bot.status = (bot.AVAILABLE, 'Startup')
-    bot.serve_forever(connect_callback = start_threads)
+    bot.on_connect = start_threads
+    bot.serve_forever()
     bot.thread_killed = True
